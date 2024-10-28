@@ -3,8 +3,8 @@ import random
 import numpy as np
 import ray
 import ray.tune as tune
-from modals.setup import create_hparams, create_parser
-from modals.trainer import TextModelTrainer
+from modals_old.setup import create_hparams, create_parser
+from modals_old.trainer import TextModelTrainer
 from ray.tune.schedulers import PopulationBasedTraining
 
 

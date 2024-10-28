@@ -4,7 +4,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from modals.custom_ops import cosine
+from modals_old.custom_ops import cosine
 from sklearn.metrics.pairwise import euclidean_distances
 
 
@@ -58,7 +58,7 @@ class RawPolicy(object):
     def __init__(self, mode, num_epochs, hp_policy=None, policy_path=None):
         """
         search: pba, must be single
-        train/test: using a pba schedule to train/test a child model, 
+        train/test: using a pba schedule to train/test a child model,
         can be a schedule or a single. However, the piority is given
         to policy_path.
         """

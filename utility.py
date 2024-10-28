@@ -7,14 +7,15 @@ import time
 import pandas as pd
 import numpy as np
 
+
 def unpickle(file):
     import pickle
     with open(file, 'rb+') as fo:
         dict = pickle.load(fo, encoding='utf-8')
     return dict
 
-def get_image_stats(dataset):
 
+def get_image_stats(dataset):
     MEANS = {
         'cifar10': (0.49139968, 0.48215841, 0.44653091),
         'reduced_cifar10': (0.49056774, 0.48116026, 0.44726052),
@@ -45,6 +46,7 @@ def imshow(img, dataset, normalize=False):
     npimg = img.detach().cpu().numpy()
     plt.imshow(np.transpose(npimg, (1, 2, 0)))
     plt.show()
+
 
 def cosine_lr(learning_rate, cur_step, total_step):
     """Cosine Learning rate.
@@ -110,7 +112,6 @@ def load_checkpoint(model, name, model_dir):
 
 
 def export_feature(dataloader, net, save_path, device):
-
     img_features = []
     img_labels = []
 
@@ -128,6 +129,7 @@ def export_feature(dataloader, net, save_path, device):
     np.save(f'feat_{save_path}', img_features)
     np.save(f'label_{save_path}', img_features)
 
+
 def to_tensor():
     def _to_tensor(image):
         if len(image.shape) == 3:
@@ -137,6 +139,7 @@ def to_tensor():
             return torch.from_numpy(image[None, :, :].astype(np.float32))
 
     return _to_tensor
+
 
 def cutout(mask_size, p, cutout_inside, mask_color=(0, 0, 0)):
     mask_size_half = mask_size // 2
@@ -172,6 +175,7 @@ def cutout(mask_size, p, cutout_inside, mask_color=(0, 0, 0)):
 
     return _cutout
 
+
 def normalize(mean, std):
     mean = np.array(mean)
     std = np.array(std)
@@ -183,22 +187,23 @@ def normalize(mean, std):
 
     return _normalize
 
-def mixup_data(x, y, alpha=1.0, use_cuda=True):
+
+def mixup_data(x, y, alpha=1.0):
     '''Returns mixed inputs, pairs of targets, and lambda'''
     if alpha > 0:
         lam = np.random.beta(alpha, alpha)
     else:
         lam = 1
 
+    device = x.device
+
     batch_size = x.size()[0]
-    if use_cuda:
-        index = torch.randperm(batch_size).cuda()
-    else:
-        index = torch.randperm(batch_size)
+    index = torch.randperm(batch_size).to(device)
 
     mixed_x = lam * x + (1 - lam) * x[index, :]
     y_a, y_b = y, y[index]
     return mixed_x, y_a, y_b, lam
+
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)

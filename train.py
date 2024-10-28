@@ -1,5 +1,5 @@
-from modals.trainer import TextModelTrainer
-from modals.setup import create_parser, create_hparams
+from modals_old.trainer import TextModelTrainer
+from modals_old.setup import create_parser, create_hparams
 
 
 def main(FLAGS, hparams):

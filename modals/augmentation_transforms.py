@@ -1,11 +1,10 @@
 import collections
-import copy
 import random
 
 import numpy as np
 import torch
 
-from modals.custom_ops import cosine
+from modals.ops import cosine
 
 PARAMETER_MAX = 10
 
@@ -26,53 +25,6 @@ def float_parameter(level, maxval):
     return torch.as_tensor(x)
 
 
-def apply_policy_from_pool(policy, img, img_pool, verbose=0):
-    """Apply the `policy` to the sentence.
-
-    Args:
-    policy: A list of tuples with the form (name, probability, magnitude) where
-      `name` is the name of the augmentation operation to apply, `probability`
-      is the probability of applying the operation and `magnitude` is what strength
-      the operation to apply.
-    img: Numpy image that will have `policy` applied to it.
-    verbose: 0: no log
-             1: text log
-             2: visualization log
-
-    Returns:
-    The result of applying `policy` to `sentence`.
-    """
-    label_img_pool = img_pool
-    display = '=> '
-    count = np.random.choice([0, 1, 2, 3], p=[0.2, 0.7, 0.1, 0.0])
-    support_idxs = []
-    ximg = img
-    if count != 0:
-        policy = copy.copy(policy)
-        random.shuffle(policy)
-        for xform in policy:
-            assert len(xform) == 3
-            name, probability, magnitude = xform
-            assert 0. <= probability <= 1.
-            assert 0 <= magnitude <= PARAMETER_MAX
-            xform_fn = NAME_TO_TRANSFORM[name].transformer(
-                probability, magnitude)
-            (ximg, support_idx), res = xform_fn(ximg, img_pool) # 1st: (img, support)
-            if verbose > 0 and res:
-                display += f"Op: {name}, Magnitude: {magnitude}, Prob: {probability} "
-                if verbose > 1:
-                    support_idxs.append(support_idx)
-            count -= res
-            assert count >= 0
-            if count == 0:
-                break
-        if verbose:
-            print(display)
-        return ximg, support_idxs
-    else:
-        return img, []
-
-
 class TransformFunction(object):
     """Wraps the Transform function for pretty printing options."""
 
@@ -83,8 +35,8 @@ class TransformFunction(object):
     def __repr__(self):
         return '<' + self.name + '>'
 
-    def __call__(self, img, label_img_pool):
-        return self.f(img, label_img_pool)
+    def __call__(self, sample, samples_pool):
+        return self.f(sample, samples_pool)
 
 
 class TransformT(object):
@@ -95,14 +47,13 @@ class TransformT(object):
         self.xform = xform_fn
 
     def transformer(self, probability, magnitude):
-
-        def return_function(img, label_img_pool):
+        def return_function(sample, samples_pool):
             res = False
             s = []
             if random.random() < probability:
-                img, s = self.xform(img, label_img_pool, magnitude)
+                img, s = self.xform(sample, samples_pool, magnitude)
                 res = True
-            return (img, s), res
+            return (sample, s), res
 
         name = self.name + '({:.1f},{})'.format(probability, magnitude)
         return TransformFunction(return_function, name)
@@ -112,72 +63,116 @@ class TransformT(object):
         return f(img, label_img_pool)
 
 
-def _interpolate(img, class_info, magnitude):
-    ''' this function interpolates target imgage with a pool of other images
-    using a magnitude
-    img: a 1D numpy arrays
-    img_pool: a 2D numpy array'''
-    m = float_parameter(magnitude, 1)
-    x = img
-    p = class_info['weights']
-    if len(p)<1:
-        return img, []
-    k = max(1, int(len(class_info['pool']) * 0.05))
-    idxs = np.random.choice(len(class_info['pool']), k, p=p) #choose points near to the boundary
-    distances = cosine(class_info['pool'][idxs]-class_info['mean'], x.detach().cpu().view(-1)-class_info['mean']) #but not too far from the seed
-    idx = idxs[np.argmax(distances)]
-    y = class_info['pool'][idx]
-    x_hat = (y.cuda()-x)*m + x
-    return x_hat, [idx]
+def _interpolate(sample, class_dict, magnitude):
+    """
+    Interpolates between a sample and a chosen sample from the pool of images in class_dict according to magnitude.
+    Args:
+        sample:
+        class_dict:
+        magnitude:
+
+    Returns:
+
+    """
+    magnitude = float_parameter(magnitude, 1)
+    p = class_dict['weights']
+    pool = class_dict['pool']
+
+    if len(p) < 1:
+        return sample, []
+
+    # Choose how many candidates from the pool to consider, for computational efficiency
+    num_candidates = max(1, int(len(pool) * 0.05))
+
+    # Choose num_candidates candidates from the pool according to the weights
+    idxs_candidates = np.random.choice(pool, num_candidates, replace=False, p=p)
+
+    # Choose the candidate that is closest to the sample, assume that everything is on the same device
+    distances = cosine(pool[idxs_candidates] - class_dict["mean"].unsqueeze(0), sample.view(-1) - class_dict["mean"])
+
+    # Choose the candidate that is closest to the sample
+    idx = idxs_candidates[torch.argmax(distances)]
+
+    chosen = pool[idx]
+
+    # Interpolate between the sample and the chosen candidate
+    interpolated = (chosen - sample) * magnitude + sample
+
+    return interpolated, [idx]
 
 
 interpolate = TransformT('Interpolate', _interpolate)
 
 
-def _extrapolate(img, class_info, magnitude):
-    ''' this function extrapolate target imgage with a pool of other images
-    using a magnitude
-    img: a 1D numpy arrays
-    img_pool: a 2D numpy array'''
+def _extrapolate(sample, class_dict, magnitude):
+    """
+    Extrapolates from a sample according to magnitude.
+    Args:
+        sample:
+        class_dict:
+        magnitude:
 
-    m = float_parameter(magnitude, 1)
-    x = img
-    mu = class_info['mean']
-    x_hat = (x-mu.cuda())*m + x
-    return x_hat, []
+    Returns:
+
+    """
+    magnitude = float_parameter(magnitude, 1)
+    mu = class_dict['mean']
+    extrapolated = (sample - mu) * magnitude + sample
+    return extrapolated, []
 
 
 extrapolate = TransformT('Extrapolate', _extrapolate)
 
 
-def _linearpolate(img, class_info, magnitude):
-    ''' this function linear move target imgage with a pool of other images
-    using a magnitude
-    img: a 1D numpy arrays
-    img_pool: a 2D numpy array'''
+def _linearpolate(sample, class_dict, magnitude):
+    """
+    Linearly interpolates between two samples from the pool of images in class_dict according to magnitude.
+    Args:
+        sample:
+        class_dict:
+        magnitude:
 
-    m = float_parameter(magnitude, 1)
-    x = img
-    if len(class_info['pool']) < 2:
-        return x, [0,0]
-    idx1, idx2 = random.sample(range(len(class_info['pool'])), 2)
-    y1, y2 = class_info['pool'][idx1], class_info['pool'][idx2]
-    x_hat = (y1.cuda()-y2.cuda())*m + x
-    return x_hat, [idx1, idx2]
+    Returns:
+
+    """
+    magnitude = float_parameter(magnitude, 1)
+    pool = class_dict['pool']
+
+    if len(pool) < 2:
+        return sample, [0, 0]
+
+    idx1, idx2 = random.sample(range(len(pool)), 2)
+    y1, y2 = pool[idx1], pool[idx2]
+
+    interpolated = (y1 - y2) * magnitude + sample
+
+    return interpolated, [idx1, idx2]
 
 
 linear_polate = TransformT('LinearPolate', _linearpolate)
 
 
-def _resample(img, class_info, magnitude):
-    x = img
-    m = float_parameter(magnitude, 1)
-    noise = torch.randn(img.size()).cuda()
-    x_hat = x+noise*class_info['sd'].cuda()*m
-    return x_hat, []
+def _resample(sample, class_dict, magnitude):
+    """
+    Resamples from a normal distribution with standard deviation from the class_dict according to magnitude.
+    this is actually equivalent to choosing a random sample from the pool of samples in the class_dict and noising it.
+    Maybe should be called noise instead of resample. (or resample with noise)
+    Args:
+        sample:
+        class_dict:
+        magnitude:
+
+    Returns:
+
+    """
+    magnitude = float_parameter(magnitude, 1)
+    noise = torch.randn(sample.size())
+    resampled = sample + noise * class_dict['sd'] * magnitude
+    return resampled, []
 
 
 resample = TransformT('Resample', _resample)
+
 
 HP_TRANSFORMS = [
     interpolate,

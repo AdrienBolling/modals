@@ -5,25 +5,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from networks.blstm import BiLSTM
+from torch import device
+
+from modals.dataloader import UCRLoader
 from torch.autograd import Variable
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import lr_scheduler
 from utility import mixup_criterion, mixup_data
 
-from modals.data_util import get_text_dataloaders
 from modals.policy import PolicyManager, RawPolicy
 
-if torch.cuda.is_available():
-    import modals.augmentation_transforms as aug_trans
-else:
-    import modals.augmentation_transforms_cpu as aug_trans
+import modals.augmentation_transforms as aug_trans
 
-from modals.custom_ops import (HardestNegativeTripletSelector,
-                               RandomNegativeTripletSelector,
-                               SemihardNegativeTripletSelector)
-from modals.losses import (OnlineTripletLoss, adverserial_loss,
-                           discriminator_loss)
+from modals.ops import (HardestNegativeTripletSelector,
+                                   RandomNegativeTripletSelector,
+                                   SemihardNegativeTripletSelector)
+from modals.losses import (OnlineTripletLoss, adversarial_loss,
+                               discriminator_loss)
+
+UCR_ROOT = 'data/UCR/'
 
 
 def count_parameters(model):
@@ -31,21 +31,11 @@ def count_parameters(model):
     print(f' |Trainable parameters: {temp}')
 
 
-def build_model(model_name, vocab, n_class, z_size=2):
+def build_model(model_name, model_args) -> tuple[nn.Module, int]:
     net = None
-    if model_name == 'blstm':
-        config = {'n_vocab': len(vocab),
-                  'n_embed': 300,
-                  'emb': vocab.vectors,
-                  'n_hidden': 256,
-                  'n_output': n_class,
-                  'n_layers': 2,
-                  'pad_idx': vocab.stoi['<pad>'],
-                  'b_dir': True,
-                  'rnn_drop': 0.2,
-                  'fc_drop': 0.5}
-        net = BiLSTM(config)
-        z_size = 256
+    if model_name == 'type1':
+        pass
+
     else:
         ValueError(f'Invalid model name={model_name}')
 
@@ -53,7 +43,9 @@ def build_model(model_name, vocab, n_class, z_size=2):
     print(f'=> {model_name}')
     count_parameters(net)
 
-    return net, z_size, model_name
+    # TODO: implement a TS model
+    z_size = None
+    return net, z_size
 
 
 class Discriminator(nn.Module):
@@ -71,7 +63,7 @@ class Discriminator(nn.Module):
         return x
 
 
-class TextModelTrainer(object):
+class TSTrainer:
 
     def __init__(self, hparams, name=''):
         self.hparams = hparams
@@ -80,20 +72,36 @@ class TextModelTrainer(object):
         self.name = name
 
         random.seed(0)
-        self.train_loader, self.valid_loader, self.test_loader, self.classes, self.vocab = get_text_dataloaders(
-            hparams['dataset_name'], valid_size=hparams['valid_size'], batch_size=hparams['batch_size'],
-            subtrain_ratio=hparams['subtrain_ratio'], dataroot=hparams['dataset_dir'])
+
+        # Load data
+        ucr_loader = UCRLoader()
+        train_loader, valid_loader, test_loader, num_classes, num_features = ucr_loader.get_dataloader(
+            ucr_root=UCR_ROOT, dataset_name=hparams['dataset_name'], batch_size=hparams['batch_size'])
+        self.train_loader = train_loader
+        self.valid_loader = valid_loader
+        self.test_loader = test_loader
         random.seed()
 
-        self.device = torch.device(
-            hparams['gpu_device'] if torch.cuda.is_available() else 'cpu')
+        # Assign device
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        self.device = device
         print()
         print('### Device ###')
         print(self.device)
-        self.net, self.z_size, self.file_name = build_model(
-            hparams['model_name'], self.vocab, len(self.classes))
+
+        self.model_name = hparams['model_name']
+        self.model_args = hparams['model_args']
+
+        # Create the feature extracting network
+        self.net, self.z_size = build_model(self.model_name, self.model_args)
         self.net = self.net.to(self.device)
 
+        # If searching for a policy, or training using a policy
         self.criterion = nn.CrossEntropyLoss()
         if hparams['mode'] in ['train', 'search']:
             self.optimizer = optim.Adam(self.net.parameters(), 0.001)
@@ -101,13 +109,11 @@ class TextModelTrainer(object):
 
             if hparams['use_modals']:
                 print("\n=> ### Policy ###")
-                # print(f'  |hp_policy: {hparams['hp_policy']}')
-                # print(f'  |policy_path: {hparams['policy_path']}')
                 raw_policy = RawPolicy(mode=hparams['mode'], num_epochs=hparams['num_epochs'],
                                        hp_policy=hparams['hp_policy'], policy_path=hparams['policy_path'])
                 transformations = aug_trans
                 self.pm = PolicyManager(
-                    transformations, raw_policy, len(self.classes), self.device)
+                    transformations, raw_policy, num_classes, self.device)
 
             print("\n### Loss ###")
             print('Classification Loss')
@@ -145,11 +151,8 @@ class TextModelTrainer(object):
                     self.metric_loss = OnlineTripletLoss(
                         margin, SemihardNegativeTripletSelector(margin))
 
-    def reset_model(self, z_size=256):
-        # tunable z_size only use for visualization
-        # if blstm is used, it is automatically 256
-        self.net, self.z_size, self.file_name = build_model(
-            self.hparams['model_name'], self.vocab, len(self.classes), z_size)
+    def reset_model(self):
+        self.net, self.z_size = build_model(self.model_name, self.model_args)
         self.net = self.net.to(self.device)
         self.optimizer = optim.Adam(self.net.parameters(), 0.001)
         self.loss_dict = {'train': [], 'valid': []}
@@ -182,18 +185,18 @@ class TextModelTrainer(object):
         print(f'\n=> Training Epoch #{cur_epoch}')
         for batch_idx, batch in enumerate(self.train_loader):
 
-            inputs, seq_lens, labels = batch.text[0].to(
-                self.device), batch.text[1].to(self.device), batch.label.to(self.device)
+            inputs, labels = batch
+            inputs = inputs.to(device)
+            labels = labels.to(device)
 
-            # if self.hparams['dataset_name'] == 'sst2':
-            labels -= 1  # because I binarized the data
+            # All labels are one-hot encoded
 
-            seed_features = self.net.extract_features(inputs, seq_lens)
+            seed_features = self.net.extract_features(inputs)
             features = seed_features
 
             if self.hparams['manifold_mixup']:
                 features, targets_a, targets_b, lam = mixup_data(features, labels,
-                                                                 0.2, use_cuda=True)
+                                                                 0.2)
                 features, targets_a, targets_b = map(Variable, (features,
                                                                 targets_a, targets_b))
             # apply pba transformation
@@ -203,22 +206,12 @@ class TextModelTrainer(object):
 
             outputs = self.net.classify(features)  # Forward Propagation
 
-            if self.hparams['mixup']:
-                inputs, targets_a, targets_b, lam = mixup_data(outputs, labels,
-                                                               self.hparams['alpha'], use_cuda=True)
-                inputs, targets_a, targets_b = map(Variable, (outputs,
-                                                              targets_a, targets_b))
-            # freeze D
             if self.hparams['enforce_prior']:
                 for p in self.D.parameters():
                     p.requires_grad = False
 
             # classification loss
-            if self.hparams['mixup'] or self.hparams['manifold_mixup']:
-                c_loss = mixup_criterion(
-                    self.criterion, outputs, targets_a, targets_b, lam)
-            else:
-                c_loss = self.criterion(outputs, labels)  # Loss
+            c_loss = self.criterion(outputs, labels)  # Loss
             clf_losses += c_loss.item()
 
             # total loss
@@ -239,7 +232,7 @@ class TextModelTrainer(object):
                 self.net.train()
                 d_fake = self.D(features)
                 g_loss = self.hparams['prior_weight'] * \
-                    adverserial_loss(d_fake, self.EPS)
+                    adversarial_loss(d_fake, self.EPS)
                 g_losses += g_loss.item()
                 loss += g_loss
 
@@ -253,7 +246,7 @@ class TextModelTrainer(object):
                 for p in self.D.parameters():
                     p.requires_grad = True
 
-                features = self.net.extract_features(inputs, seq_lens)
+                features = self.net.extract_features(inputs)
                 d_real = self.D(torch.randn(features.size()).to(self.device))
                 d_fake = self.D(F.softmax(features, dim=0))
                 d_loss = discriminator_loss(d_real, d_fake, self.EPS)
@@ -263,13 +256,10 @@ class TextModelTrainer(object):
                 d_losses += d_loss.item()
 
             # Accuracy
+            # TODO: correct the compute taking into account one-hot labels
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
-            if self.hparams['mixup']:
-                correct += (lam * predicted.eq(targets_a.data).cpu().sum().float()
-                            + (1 - lam) * predicted.eq(targets_b.data).cpu().sum().float())
-            else:
-                correct += (predicted == labels).sum().item()
+            correct += (predicted == labels).sum().item()
 
         # step
         step = (cur_epoch-1)*(len(self.train_loader)) + batch_idx
